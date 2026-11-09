@@ -5,6 +5,9 @@
 
 A DSH plugin that puts **reload / restart / quit** in the sidebar footer.
 
+仓库 / repo: <https://github.com/jiboda394-glitch/dsh-sidebar-actions> ·
+下载 release 里的 `dsh-sidebar-actions-1.0.0.tgz` 即可离线分发。
+
 ---
 
 ## 功能
@@ -28,10 +31,10 @@ A DSH plugin that puts **reload / restart / quit** in the sidebar footer.
 
 ```sh
 dsh plugin --profile <profile> add ./dsh-sidebar-actions-1.0.0.tgz
-# 已发布到 npm 后：
-dsh plugin --profile <profile> add dsh-sidebar-actions
-# 或直接从 GitHub 源码安装：
-dsh plugin --profile <profile> add github:<owner>/dsh-sidebar-actions
+# 或直接从 GitHub 安装（源码）：
+dsh plugin --profile <profile> add github:jiboda394-glitch/dsh-sidebar-actions
+# 或用 release 里的 tarball 地址：
+dsh plugin --profile <profile> add https://github.com/jiboda394-glitch/dsh-sidebar-actions/releases/download/v1.0.0/dsh-sidebar-actions-1.0.0.tgz
 ```
 
 装完重启一次 `dsh web`。
