@@ -1,0 +1,3 @@
+- insert:
+    - id: sidebar-actions
+      name: 'dsh-sidebar-actions'

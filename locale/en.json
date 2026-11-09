@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Sidebar actions",
+    "description": "Adds reload, restart, and quit to the sidebar footer and can restart or quit the desktop app, gracefully when the shell offers a bridge and by a detached helper otherwise."
+  }
+}
