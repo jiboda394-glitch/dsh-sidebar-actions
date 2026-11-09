@@ -71,7 +71,7 @@ dsh plugin --profile <profile> add https://github.com/jiboda394-glitch/dsh-sideb
 
 `/diagnose` 的 `checks` 就是「功能是否可用」的清单：`desktop`、`shellReachable`、`helperReady`、`routeReady`、`clientMounted`。**应用升级后先打开这个地址跑一次**，比点按钮试错快。
 
-`clientMounted` 由页面自己请求 `/state` 时置位；刚重启宿主时它是 `false`，刷新一次页面再看。
+`clientMounted` 由页面自己请求 `/state` 时置位。桌面端页面来自 `dsh-app://`，Chromium 不会带 `Sec-Fetch-Site`，所以这里也认「浏览器类 User-Agent」；命令行 `curl`/PowerShell 探测不算。刚重载宿主时它是 `false`，刷新一次页面再看。
 
 常见现象：
 

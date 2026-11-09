@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1
+
+- `clientMounted` in `/api/diagnose` no longer misses the desktop page: fetches
+  from `dsh-app://` carry no `Sec-Fetch-Site`, so a browser-ish user agent counts
+  too (local probes are still ignored).
+
 ## 1.0.0
 
 - First public release.

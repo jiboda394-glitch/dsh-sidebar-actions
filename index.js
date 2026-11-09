@@ -582,13 +582,19 @@ export function apply(ctx) {
       sendJson(res, 404, { ok: false, error: 'unknown route' })
       return
     }
-    // A browser adds fetch metadata; local probes (curl, tests) do not. That
-    // makes this a cheap proof the page half really is mounted and asking.
-    if (route === '/state' && typeof req.headers?.['sec-fetch-site'] === 'string') {
+    // A page fetch proves the page half is mounted. The desktop page is served
+    // from `dsh-app://`, where Chromium omits `Sec-Fetch-Site`, so a browser-ish
+    // user agent counts too — local probes (curl, PowerShell, node) do not.
+    const probeAgent = String(req.headers?.['user-agent'] || '')
+    const pageLike =
+      typeof req.headers?.['sec-fetch-site'] === 'string' ||
+      typeof req.headers?.referer === 'string' ||
+      (probeAgent !== '' && !/powershell|curl|python|node|wget/i.test(probeAgent))
+    if (route === '/state' && pageLike) {
       clientProbe = {
         at: new Date().toISOString(),
-        site: req.headers['sec-fetch-site'],
-        ua: String(req.headers['user-agent'] || '').slice(0, 120),
+        site: String(req.headers?.['sec-fetch-site'] ?? 'none'),
+        ua: probeAgent.slice(0, 120),
       }
     }
     try {
