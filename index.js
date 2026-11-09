@@ -156,6 +156,85 @@ function desktopInfo() {
   }
 }
 
+let versionCache
+
+/** The shell's own version, read the way Electron's asar layer supports. */
+function readDshVersion() {
+  if (versionCache !== undefined) return versionCache
+  versionCache = null
+  try {
+    const manifest = join(process.resourcesPath ?? '', 'app.asar', 'package.json')
+    const parsed = JSON.parse(readFileSync(manifest, 'utf8'))
+    if (typeof parsed?.version === 'string') versionCache = parsed.version
+  } catch {
+    /* version reporting is optional */
+  }
+  return versionCache
+}
+
+/**
+ * Confirm the process we are about to stop really is the desktop shell.
+ *
+ * The host is spawned by the shell, so `process.ppid` is the shell — as long as
+ * that stays true. A future shell that adds a wrapper would make the pid point
+ * at something else, and blindly killing it is the one mistake this plugin must
+ * not make. Returns ok:true when the check cannot run at all, because a missing
+ * PowerShell should not disable an otherwise working restart.
+ */
+function verifyShell() {
+  const pid = process.ppid
+  const exe = process.execPath
+  if (process.platform !== 'win32' || !existsSync(POWERSHELL) || pid <= 0) {
+    return Promise.resolve({ ok: true, detail: 'unchecked' })
+  }
+  const quotedPid = String(pid)
+  const quotedExe = `'${String(exe).replace(/'/g, "''")}'`
+  const command = [
+    `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${quotedPid}" -ErrorAction SilentlyContinue`,
+    `if ($null -eq $p) { 'missing' }`,
+    `elseif ($p.ExecutablePath -ne ${quotedExe}) { 'mismatch:' + $p.ExecutablePath }`,
+    `elseif ($p.CommandLine -match '--type=') { 'child' }`,
+    `else { 'ok' }`,
+  ].join('; ')
+
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    try {
+      const child = spawn(
+        POWERSHELL,
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command],
+        { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true },
+      )
+      let out = ''
+      child.stdout?.setEncoding('utf8')
+      child.stdout?.on('data', (chunk) => {
+        out += chunk
+      })
+      child.on('error', () => finish({ ok: true, detail: 'unchecked' }))
+      child.on('exit', () => finish(interpretShellProbe(out)))
+      setTimeout(() => finish({ ok: true, detail: 'probe timed out' }), 4000).unref?.()
+    } catch {
+      finish({ ok: true, detail: 'unchecked' })
+    }
+  })
+}
+
+function interpretShellProbe(output) {
+  const text = String(output || '').trim().split('\n').pop()?.trim() ?? ''
+  if (text === 'ok' || text === '') return { ok: true, detail: 'ok' }
+  if (text === 'missing') return { ok: false, detail: 'the shell process is gone' }
+  if (text === 'child') return { ok: false, detail: 'the parent is a child process, not the shell' }
+  if (text.startsWith('mismatch:')) {
+    return { ok: false, detail: `the parent runs a different executable: ${text.slice('mismatch:'.length)}` }
+  }
+  return { ok: true, detail: `unrecognised probe answer: ${text}` }
+}
+
 function modeOf(info) {
   if (!info.desktop) return 'unsupported'
   return info.bridge ? 'graceful' : 'forced'
@@ -321,6 +400,11 @@ function writeBridgeRequest(action) {
 }
 
 async function forced(action) {
+  const shell = await verifyShell()
+  if (!shell.ok) {
+    note(`forced ${action} refused: ${shell.detail}`)
+    return { ok: false, error: 'shell-not-found', detail: shell.detail }
+  }
   const task = await ensureTask()
   if (!task.ready) {
     note(`forced ${action} skipped: ${task.detail}`)
@@ -383,6 +467,12 @@ function rejectRequest(req) {
   }
 }
 
+/** Last state request that came from the page itself (not a local probe). */
+let clientProbe = null
+
+/** Filled by apply(): what this composition actually gave the plugin. */
+const apiState = { routeReady: false, webServerRegister: false, slot: 'sidebar.footer.action' }
+
 function statePayload(extra = {}) {
   const info = desktopInfo()
   return {
@@ -396,6 +486,10 @@ function statePayload(extra = {}) {
     shellPid: info.shellPid,
     shellExe: info.shellExe,
     task: { name: TASK_NAME, ready: taskState.ready, detail: taskState.detail },
+    pkgDir: PKG_DIR,
+    dshVersion: readDshVersion(),
+    api: { ...apiState },
+    clientProbe,
     stateDir: STATE_DIR,
     ...extra,
   }
@@ -405,11 +499,47 @@ export function apply(ctx) {
   ensureStateDir()
   note(`plugin ${version} applied on ${process.platform} (ppid ${process.ppid})`)
 
+  apiState.webServerRegister = typeof ctx?.webServer?.register === 'function'
+  if (!apiState.webServerRegister) note('webServer.register unavailable — restart and quit are disabled')
+
   // Best effort: register the helper task early so the first click is quick and
   // /state can report readiness. In graceful mode it is only the fallback.
   if (desktopInfo().desktop && process.platform === 'win32') void ensureTask()
 
   const handlers = {
+    /**
+     * Read-only readiness report. Everything restart and quit depend on, without
+     * stopping anything: the shell pid resolution, the helper task, the bridge,
+     * the plugin package that is serving this route, and the shell version.
+     */
+    '/diagnose': async (req, res) => {
+      if (req.method !== 'GET' && req.method !== 'POST') {
+        sendJson(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      const shell = await verifyShell()
+      const task = await ensureTask()
+      sendJson(
+        res,
+        200,
+        statePayload({
+          ok: true,
+          shell,
+          task,
+          bridgeMarker: { path: BRIDGE_MARKER, present: existsSync(BRIDGE_MARKER) },
+          requestFile: REQUEST,
+          launcher: LAUNCHER,
+          checks: {
+            desktop: desktopInfo().desktop,
+            shellReachable: shell.ok,
+            helperReady: task.ready,
+            routeReady: apiState.routeReady,
+            clientMounted: clientProbe !== null,
+          },
+          log: logTail(),
+        }),
+      )
+    },
     '/state': async (req, res) => {
       if (req.method !== 'GET' && req.method !== 'HEAD') {
         sendJson(res, 405, { ok: false, error: 'method not allowed' })
@@ -452,6 +582,15 @@ export function apply(ctx) {
       sendJson(res, 404, { ok: false, error: 'unknown route' })
       return
     }
+    // A browser adds fetch metadata; local probes (curl, tests) do not. That
+    // makes this a cheap proof the page half really is mounted and asking.
+    if (route === '/state' && typeof req.headers?.['sec-fetch-site'] === 'string') {
+      clientProbe = {
+        at: new Date().toISOString(),
+        site: req.headers['sec-fetch-site'],
+        ua: String(req.headers['user-agent'] || '').slice(0, 120),
+      }
+    }
     try {
       await routeHandler(req, res)
     } catch (error) {
@@ -465,7 +604,8 @@ export function apply(ctx) {
       () => ctx.webServer.register({ kind: 'prefix', path: PREFIX, handler }),
       `${name}: api route`,
     )
-    note('api route registered')
+    apiState.routeReady = true
+    note(`api route registered (dsh ${readDshVersion() ?? 'unknown'})`)
   } else {
     note('webServer.register unavailable — restart and quit are disabled')
   }

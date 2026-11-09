@@ -61,9 +61,14 @@ dsh plugin --profile <profile> add github:<owner>/dsh-sidebar-actions
 | 东西 | 位置 |
 | --- | --- |
 | 状态接口 | `GET /dsh-sidebar-actions/api/state`（同源） |
+| 只读自检 | `GET /dsh-sidebar-actions/api/diagnose`：shell 解析、助手任务、桥接、路由、页面是否挂载 |
 | 插件日志 | `%LOCALAPPDATA%\dsh-sidebar-actions\host.log` |
 | 助手日志 | `%LOCALAPPDATA%\dsh-sidebar-actions\helper.log` |
 | 助手任务 | `schtasks /query /tn DSH-SidebarActions /v /fo list` |
+
+`/diagnose` 的 `checks` 就是「功能是否可用」的清单：`desktop`、`shellReachable`、`helperReady`、`routeReady`、`clientMounted`。**应用升级后先打开这个地址跑一次**，比点按钮试错快。
+
+`clientMounted` 由页面自己请求 `/state` 时置位；刚重启宿主时它是 `false`，刷新一次页面再看。
 
 常见现象：
 
@@ -113,6 +118,9 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\dsh-sidebar-actions"
 ## 兼容性与安全
 
 - 目标环境：DeepSeek Harness Desktop 0.2.x（Windows）。`dsh web` 下只有「刷新」可用，这是有意为之。
+- 升级适配：不绑定 DSH 版本，也不读私有 API —— 桌面与否看 `process.versions.electron` / `ELECTRON_RUN_AS_NODE` / `resources/app.asar`，桥接看标记文件，重启只看操作系统进程。`/state.dshVersion` 会报出当前宿主版本。
+- 每次重启前会用 PowerShell 校验 `process.ppid` 确实是桌面 shell（可执行文件一致、命令行不含 `--type=`）。将来若宿主不再是 shell 的直接子进程，插件会返回 `shell-not-found` 并**拒绝**执行，而不是杀错进程。
+- `webServer.register` 或槽位接口若在某次升级里改名，按钮/接口会失效但不会拖垮应用：宿主日志会写 `webServer.register unavailable`，页面半则只是不注册。
 - 不联网、不收集任何数据；所有逻辑都在本机。
 - API 只接受同源 `POST`（`Sec-Fetch-Site` / `Origin` 校验），别的网页无法触发重启。
 - 助手任务以当前用户运行，仅当需要重启/退出时被 `schtasks /run` 拉起；不会常驻。
