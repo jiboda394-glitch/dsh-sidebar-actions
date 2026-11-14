@@ -24,7 +24,7 @@ A DSH plugin that puts **reload / restart / quit** in the sidebar footer.
 ### DSH Desktop
 
 1. 打开 **设置 → 插件**（或插件市场）。
-2. 选「从本地目录安装」并选中本包的目录，或把 `dist/dsh-sidebar-actions-1.0.0.tgz` 的路径填进安装框。
+2. 选「从本地目录安装」并选中本包的目录，或把 `dist/dsh-sidebar-actions-1.0.2.tgz` 的路径填进安装框。
 3. 安装完成后刷新一次页面（页面里的「刷新」按钮就行），底部就会出现三个按钮。
 
 ### 普通 `dsh web`
@@ -34,7 +34,7 @@ dsh plugin --profile <profile> add ./dsh-sidebar-actions-<版本>.tgz
 # 或直接从 GitHub 安装（源码）：
 dsh plugin --profile <profile> add github:jiboda394-glitch/dsh-sidebar-actions
 # 或用 release 里的 tarball 地址（版本号按需替换）：
-dsh plugin --profile <profile> add https://github.com/jiboda394-glitch/dsh-sidebar-actions/releases/download/v1.0.1/dsh-sidebar-actions-1.0.1.tgz
+dsh plugin --profile <profile> add https://github.com/jiboda394-glitch/dsh-sidebar-actions/releases/download/v1.0.2/dsh-sidebar-actions-1.0.2.tgz
 ```
 
 装完重启一次 `dsh web`。
@@ -58,6 +58,10 @@ dsh plugin --profile <profile> add https://github.com/jiboda394-glitch/dsh-sideb
 3. 重启用**原始命令行**（WMI `Win32_Process.Create`）把应用拉起来。
 
 这条路径能在**未打补丁的原版应用**上工作，代价是：它是强制结束，**不会弹「当前任务会被中断」的原生确认**——所以按钮要求二次确认，悬停提示也会写明。Windows 专属；其他平台只能用桥接。
+
+助手只结束进程再用原始命令行拉起，**不写应用安装目录**。1.0.1 及更早版本会在这一步把一个「待安装的」`app.asar.new` 拷进安装目录：如果那个包是升级前打的旧补丁，重启就会把新版本的应用包换成旧的，启动直接失败（`app.asar.unpacked` 里报 `ENOENT`）。1.0.2 已移除该行为。
+
+重启前还会比对 `app.asar` 的版本与主程序文件版本，不一致就拒绝重启并返回 `version-mismatch`——坏掉的安装会被指出来，而不是被启动。
 
 ## 状态、日志与排错
 
@@ -123,6 +127,7 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\dsh-sidebar-actions"
 - 目标环境：DeepSeek Harness Desktop 0.2.x（Windows）。`dsh web` 下只有「刷新」可用，这是有意为之。
 - 升级适配：不绑定 DSH 版本，也不读私有 API —— 桌面与否看 `process.versions.electron` / `ELECTRON_RUN_AS_NODE` / `resources/app.asar`，桥接看标记文件，重启只看操作系统进程。`/state.dshVersion` 会报出当前宿主版本。
 - 每次重启前会用 PowerShell 校验 `process.ppid` 确实是桌面 shell（可执行文件一致、命令行不含 `--type=`）。将来若宿主不再是 shell 的直接子进程，插件会返回 `shell-not-found` 并**拒绝**执行，而不是杀错进程。
+- 重启前还会比对 `resources/app.asar` 的版本与主程序文件版本（`/diagnose.installVersions`），不一致返回 `version-mismatch` 并拒绝重启；任一版本读不到或格式不认识时放行。`DSH_SIDEBAR_ACTIONS_SKIP_VERSION_CHECK=1` 可关闭这项检查。
 - `webServer.register` 或槽位接口若在某次升级里改名，按钮/接口会失效但不会拖垮应用：宿主日志会写 `webServer.register unavailable`，页面半则只是不注册。
 - 不联网、不收集任何数据；所有逻辑都在本机。
 - API 只接受同源 `POST`（`Sec-Fetch-Site` / `Origin` 校验），别的网页无法触发重启。
@@ -135,6 +140,7 @@ Adds **reload / restart / quit** to the sidebar footer.
 - Reload is plain `location.reload()`.
 - Restart and quit need the desktop shell. The plugin uses a *graceful bridge* when `%LOCALAPPDATA%\dsh-restart.bridge` exists and the shell polls `dsh-restart.request` / `dsh-quit.request`; an ignored request falls back to a *detached helper* after 2.5 s: a per-user scheduled task (`DSH-SidebarActions`) running `scripts/dsh-stop.ps1` outside the app's process tree, which stops the shell process and starts the executable again with its original command line.
 - The forced path works on an unpatched app but interrupts running tasks without the native prompt, so every stop needs a second click.
+- The helper only stops and relaunches the app; it never writes to the installation. Restart is refused (`version-mismatch`) when the `app.asar` version does not match the executable's file version.
 - Windows only for the forced path; other platforms use the bridge exclusively.
 
 State and logs: `GET /dsh-sidebar-actions/api/state`, `%LOCALAPPDATA%\dsh-sidebar-actions\{host,helper}.log`.

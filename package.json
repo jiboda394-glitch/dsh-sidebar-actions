@@ -1,6 +1,6 @@
 {
   "name": "dsh-sidebar-actions",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Refresh, restart, and quit DeepSeek Harness from the sidebar footer, with graceful and forced desktop paths.",
   "type": "module",
   "license": "MIT",

@@ -40,7 +40,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const name = 'dsh-sidebar-actions'
@@ -62,7 +62,18 @@ function userLocalBase() {
 }
 
 const BASE = userLocalBase()
-const STATE_DIR = join(BASE, 'dsh-sidebar-actions')
+/**
+ * Host state directory: log, launcher and the stored helper request. Defaults to
+ * `%LOCALAPPDATA%\dsh-sidebar-actions`; `DSH_SIDEBAR_ACTIONS_HOME` moves it
+ * elsewhere. The shell-bridge request files stay on {@link BASE} regardless,
+ * because that is where the desktop shell polls for them.
+ */
+function stateHome() {
+  const override = process.env.DSH_SIDEBAR_ACTIONS_HOME
+  if (override && override.trim()) return resolve(override.trim())
+  return join(BASE, 'dsh-sidebar-actions')
+}
+const STATE_DIR = stateHome()
 const LOG = join(STATE_DIR, 'host.log')
 const REQUEST = join(STATE_DIR, 'request.json')
 const LAUNCHER = join(STATE_DIR, 'launcher.vbs')
@@ -233,6 +244,79 @@ function interpretShellProbe(output) {
     return { ok: false, detail: `the parent runs a different executable: ${text.slice('mismatch:'.length)}` }
   }
   return { ok: true, detail: `unrecognised probe answer: ${text}` }
+}
+
+/* ------------------------------------------------------------------ *
+ * Installation consistency: never restart into a mismatched package
+ * ------------------------------------------------------------------ */
+
+/**
+ * A desktop install is a main executable plus `resources/app.asar`. A partial
+ * update — or an old patched pack copied over a newer build — leaves the two on
+ * different versions, and the next start fails before the window opens. The
+ * restart button is the most likely thing to trigger that start, so compare the
+ * executable's file version with the archive's manifest first.
+ *
+ * Best effort only: when either side cannot be read or does not look like a
+ * version, the restart is allowed instead of blocked.
+ */
+const SKIP_VERSION_CHECK = process.env.DSH_SIDEBAR_ACTIONS_SKIP_VERSION_CHECK === '1'
+const VERSION_SHAPE = /^\d+\.\d+\.\d+(?:[+-][0-9a-z.+-]+)?$/i
+
+let exeVersionCache = { at: 0, value: null }
+
+function probeExeVersion() {
+  const now = Date.now()
+  if (now - exeVersionCache.at < 300000) return Promise.resolve(exeVersionCache.value)
+  const exe = process.execPath
+  if (process.platform !== 'win32' || !exe || !existsSync(POWERSHELL)) return Promise.resolve(null)
+  const quoted = `'${String(exe).replace(/'/g, "''")}'`
+  const command = `(Get-Item -LiteralPath ${quoted}).VersionInfo.FileVersion`
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      exeVersionCache = { at: Date.now(), value }
+      resolve(value)
+    }
+    try {
+      const child = spawn(
+        POWERSHELL,
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command],
+        { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true },
+      )
+      let out = ''
+      child.stdout?.setEncoding('utf8')
+      child.stdout?.on('data', (chunk) => {
+        out += chunk
+      })
+      child.on('error', () => finish(null))
+      child.on('exit', () => {
+        const text = String(out || '').trim()
+        finish(text === '' ? null : text)
+      })
+      setTimeout(() => finish(null), 5000).unref?.()
+    } catch {
+      finish(null)
+    }
+  })
+}
+
+function sameVersion(a, b) {
+  return String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase()
+}
+
+async function checkInstallVersions() {
+  const archive = readDshVersion()
+  if (SKIP_VERSION_CHECK) return { ok: true, detail: 'check disabled', archive, app: null }
+  const app = await probeExeVersion()
+  if (!archive || !app) return { ok: true, detail: 'unchecked', archive, app }
+  if (sameVersion(archive, app)) return { ok: true, detail: 'match', archive, app }
+  if (!VERSION_SHAPE.test(String(archive)) || !VERSION_SHAPE.test(String(app))) {
+    return { ok: true, detail: 'unrecognised version format', archive, app }
+  }
+  return { ok: false, detail: `app.asar ${archive} does not match the app ${app}`, archive, app }
 }
 
 function modeOf(info) {
@@ -426,6 +510,18 @@ async function forced(action) {
 async function perform(action) {
   const info = desktopInfo()
   if (!info.desktop) return { ok: false, error: 'desktop-only' }
+  if (action === 'restart') {
+    const versions = await checkInstallVersions()
+    if (!versions.ok) {
+      note(`restart refused: ${versions.detail}`)
+      return {
+        ok: false,
+        error: 'version-mismatch',
+        detail: versions.detail,
+        versions: { app: versions.app, archive: versions.archive },
+      }
+    }
+  }
   if (info.bridge && writeBridgeRequest(action)) return { ok: true, via: 'graceful' }
   return forced(action)
 }
@@ -519,6 +615,7 @@ export function apply(ctx) {
       }
       const shell = await verifyShell()
       const task = await ensureTask()
+      const installVersions = await checkInstallVersions()
       sendJson(
         res,
         200,
@@ -526,6 +623,7 @@ export function apply(ctx) {
           ok: true,
           shell,
           task,
+          installVersions,
           bridgeMarker: { path: BRIDGE_MARKER, present: existsSync(BRIDGE_MARKER) },
           requestFile: REQUEST,
           launcher: LAUNCHER,

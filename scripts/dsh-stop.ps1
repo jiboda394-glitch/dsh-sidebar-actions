@@ -121,6 +121,11 @@ do {
 
 Note ("remaining processes: " + $remaining.Count)
 
+# This helper never writes to the installation. It used to copy a staged
+# app.asar.new over the installed package here, which is how a stale pack could
+# be put on top of a freshly updated app; that is out of scope for a sidebar
+# plugin, and the tray tooling installs its own package with a version check.
+
 if ($action -ne 'restart') {
   Note 'quit complete'
   return
