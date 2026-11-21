@@ -12,18 +12,13 @@
  * replaced (the patched script is appended at the end, then the header is
  * rewritten). The build refuses to touch a package whose layout it does not
  * recognise, and does nothing when the pollers are already present.
+ *
+ * `io` is a node:fs-compatible module. The plugin host runs inside Electron,
+ * whose patched `fs` cannot open an ASAR as a file, so it passes
+ * `require('original-fs')` instead.
  */
 import { createHash } from 'node:crypto'
-import {
-  closeSync,
-  copyFileSync,
-  fstatSync,
-  openSync,
-  readSync,
-  renameSync,
-  rmSync,
-  writeSync,
-} from 'node:fs'
+import * as nodeFs from 'node:fs'
 
 const RESTART_MARKER = 'dsh-restart: request poll failed'
 const QUIT_MARKER = 'dsh-quit: request poll failed'
@@ -72,13 +67,12 @@ function hash(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
-/** Reads the archive header and the packed `lib/main.js` entry. */
-function readMainArchive(filename) {
-  const fd = openSync(filename, 'r')
+function readHeader(io, filename) {
+  const fd = io.openSync(filename, 'r')
   try {
     const prefix = Buffer.alloc(16)
-    const size = fstatSync(fd).size
-    if (readSync(fd, prefix, 0, prefix.length, 0) !== prefix.length) {
+    const size = io.fstatSync(fd).size
+    if (io.readSync(fd, prefix, 0, prefix.length, 0) !== prefix.length) {
       throw new Error(`truncated ASAR header: ${filename}`)
     }
     const jsonLen = prefix.readUInt32LE(12)
@@ -88,10 +82,20 @@ function readMainArchive(filename) {
       throw new Error(`invalid ASAR header: ${filename}`)
     }
     const json = Buffer.alloc(jsonLen)
-    if (readSync(fd, json, 0, jsonLen, prefix.length) !== jsonLen) {
+    if (io.readSync(fd, json, 0, jsonLen, prefix.length) !== jsonLen) {
       throw new Error(`truncated ASAR header JSON: ${filename}`)
     }
-    const header = JSON.parse(json.toString('utf8'))
+    return { fd, base, jsonLen, header: JSON.parse(json.toString('utf8')), size }
+  } catch (error) {
+    io.closeSync(fd)
+    throw error
+  }
+}
+
+/** Reads the archive header and the packed `lib/main.js` entry. */
+function readMainArchive(io, filename) {
+  const { fd, base, jsonLen, header, size } = readHeader(io, filename)
+  try {
     const entry = header.files?.lib?.files?.['main.js']
     if (!entry || entry.unpacked) throw new Error(`packed lib/main.js missing: ${filename}`)
     const offset = Number(entry.offset)
@@ -99,40 +103,33 @@ function readMainArchive(filename) {
       throw new Error(`lib/main.js is outside the ASAR data: ${filename}`)
     }
     const bytes = Buffer.alloc(entry.size)
-    if (readSync(fd, bytes, 0, bytes.length, base + offset) !== bytes.length || hash(bytes) !== entry.integrity?.hash) {
+    if (io.readSync(fd, bytes, 0, bytes.length, base + offset) !== bytes.length || hash(bytes) !== entry.integrity?.hash) {
       throw new Error(`lib/main.js failed ASAR integrity verification: ${filename}`)
     }
     return { size, base, jsonLen, header, entry, bytes }
   } finally {
-    closeSync(fd)
+    io.closeSync(fd)
   }
 }
 
 /**
  * Reads `package.json` from an archive header without loading the whole file.
- * Used as a fallback when the host cannot read inside an ASAR through its own
+ * Used as a fallback when the host cannot read an ASAR through its own
  * filesystem layer.
  */
-export function readArchiveVersion(filename) {
-  const fd = openSync(filename, 'r')
+export function readArchiveVersion(filename, io = nodeFs) {
+  const { fd, base, header } = readHeader(io, filename)
   try {
-    const prefix = Buffer.alloc(16)
-    if (readSync(fd, prefix, 0, prefix.length, 0) !== prefix.length) throw new Error('truncated header')
-    const jsonLen = prefix.readUInt32LE(12)
-    const base = 8 + prefix.readUInt32LE(4)
-    const json = Buffer.alloc(jsonLen)
-    if (readSync(fd, json, 0, jsonLen, prefix.length) !== jsonLen) throw new Error('truncated header JSON')
-    const header = JSON.parse(json.toString('utf8'))
     const entry = header.files?.['package.json']
     if (!entry || entry.unpacked) throw new Error('package.json is not packed')
     const bytes = Buffer.alloc(entry.size)
-    if (readSync(fd, bytes, 0, bytes.length, base + Number(entry.offset)) !== bytes.length) {
+    if (io.readSync(fd, bytes, 0, bytes.length, base + Number(entry.offset)) !== bytes.length) {
       throw new Error('truncated package.json')
     }
     const parsed = JSON.parse(bytes.toString('utf8'))
     return typeof parsed?.version === 'string' ? parsed.version : null
   } finally {
-    closeSync(fd)
+    io.closeSync(fd)
   }
 }
 
@@ -142,8 +139,8 @@ export function readArchiveVersion(filename) {
  * @returns {{alreadyPatched: true} | {alreadyPatched: false, out: string, outSize: number,
  *   srcSize: number, sha: string, added: string[]}}
  */
-export function buildPatchedArchive(src, out) {
-  const { size: srcSize, base, jsonLen, header, entry, bytes } = readMainArchive(src)
+export function buildPatchedArchive(src, out, io = nodeFs) {
+  const { size: srcSize, base, jsonLen, header, entry, bytes } = readMainArchive(io, src)
   const oldSize = entry.size
   const oldOffset = Number(entry.offset)
   let text = bytes.toString('utf8')
@@ -193,20 +190,20 @@ export function buildPatchedArchive(src, out) {
 
   const staged = `${out}.tmp`
   try {
-    copyFileSync(src, staged)
-    const fd = openSync(staged, 'r+')
+    io.copyFileSync(src, staged, nodeFs.constants.COPYFILE_EXCL)
+    const fd = io.openSync(staged, 'r+')
     try {
-      writeSync(fd, padded, 0, jsonLen, 16)
-      writeSync(fd, mainNew, 0, mainNew.length, newOffsetAbs)
+      io.writeSync(fd, padded, 0, jsonLen, 16)
+      io.writeSync(fd, mainNew, 0, mainNew.length, newOffsetAbs)
     } finally {
-      closeSync(fd)
+      io.closeSync(fd)
     }
-    if (!readMainArchive(staged).bytes.equals(mainNew)) {
+    if (!readMainArchive(io, staged).bytes.equals(mainNew)) {
       throw new Error('the generated ASAR does not contain the patched script')
     }
-    renameSync(staged, out)
+    io.renameSync(staged, out)
   } finally {
-    rmSync(staged, { force: true })
+    try { io.rmSync(staged, { force: true }) } catch { /* already renamed */ }
   }
 
   return {

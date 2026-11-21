@@ -27,6 +27,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import * as nodeFs from 'node:fs'
 import {
   appendFileSync,
   closeSync,
@@ -40,8 +41,25 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
+import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+const require = createRequire(import.meta.url)
+
+/**
+ * Electron patches `fs` so a path that ends in `.asar` is interpreted as the
+ * archive root: `stat` reports size 0 and `open` throws "ENOENT, not found in
+ * <archive>". `original-fs` skips that layer, which is what makes it possible
+ * to measure and rebuild the installed package from inside the desktop app.
+ */
+const ARCHIVE_FS = (() => {
+  try {
+    return require('original-fs')
+  } catch {
+    return nodeFs
+  }
+})()
 
 export const name = 'dsh-sidebar-actions'
 export const inject = ['webServer']
@@ -173,7 +191,7 @@ function hasShellBridge(force = false) {
 function bridgeFresh() {
   try {
     const marker = statSync(BRIDGE_MARKER)
-    const archive = statSync(asarPath())
+    const archive = ARCHIVE_FS.statSync(asarPath())
     return marker.mtimeMs >= archive.mtimeMs
   } catch {
     return false
@@ -571,7 +589,7 @@ async function ensurePatchStaged() {
   if (!version && archive && existsSync(archive)) {
     try {
       const { readArchiveVersion } = await import(new URL('./scripts/patch.js', import.meta.url).href)
-      version = readArchiveVersion(archive)
+      version = readArchiveVersion(archive, ARCHIVE_FS)
     } catch {
       /* fall back to the null version below */
     }
@@ -596,7 +614,7 @@ async function ensurePatchStaged() {
       meta.version === version &&
       existsSync(PATCH_STAGE) &&
       statSync(PATCH_STAGE).size === meta.stageSize &&
-      statSync(archive).size === meta.baseSize
+      ARCHIVE_FS.statSync(archive).size === meta.baseSize
     ) {
       patchState = { staged: true, version, detail: 'staged earlier', at: Date.now() }
       return patchState
@@ -604,7 +622,7 @@ async function ensurePatchStaged() {
 
     mkdirSync(PATCH_DIR, { recursive: true })
     const { buildPatchedArchive } = await import(new URL('./scripts/patch.js', import.meta.url).href)
-    const report = buildPatchedArchive(archive, PATCH_STAGE)
+    const report = buildPatchedArchive(archive, PATCH_STAGE, ARCHIVE_FS)
     if (report.alreadyPatched) {
       // The package on disk carries the pollers (e.g. installed by other
       // tooling), so refresh the marker instead of staging a duplicate.

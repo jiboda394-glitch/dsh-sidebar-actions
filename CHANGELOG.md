@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.4
+
+- Fix the bridge upkeep inside the desktop host: Electron's patched `fs` treats
+  a path ending in `.asar` as the archive root (`stat` reports size 0, `open`
+  throws `ENOENT, not found in <archive>`), so the freshness check and the
+  rebuild failed silently in 1.0.3. Both now use `original-fs`, which bypasses
+  that layer; the plain-Node fallback is unchanged.
+
 ## 1.0.3
 
 - The graceful bridge now survives app updates by itself. Every DSH update
