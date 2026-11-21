@@ -121,10 +121,26 @@ do {
 
 Note ("remaining processes: " + $remaining.Count)
 
-# This helper never writes to the installation. It used to copy a staged
-# app.asar.new over the installed package here, which is how a stale pack could
-# be put on top of a freshly updated app; that is out of scope for a sidebar
-# plugin, and the tray tooling installs its own package with a version check.
+# Install the bridge patch the host staged for this exact version. This is the
+# only moment the package is unlocked, and install-patch.ps1 refuses anything
+# that no longer matches (version, sizes, hash), so a stale package is never
+# installed - the failure mode that once put an rc.2 pack on an rc.3 install.
+$patchInstalled = $false
+$exeVersion = ''
+try { $exeVersion = [string](Get-Item -LiteralPath $exe).VersionInfo.FileVersion } catch { }
+$archive = Join-Path (Split-Path -Parent $exe) 'resources\app.asar'
+$installer = Join-Path $PSScriptRoot 'install-patch.ps1'
+if ($action -eq 'restart' -and (Test-Path -LiteralPath $installer) -and (Test-Path -LiteralPath $archive)) {
+  $code = 2
+  try {
+    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden `
+      -File $installer -StateDir $stateDir -Exe $exe -Archive $archive
+    $code = $LASTEXITCODE
+  } catch {
+    Note ("patch step error: " + $_.Exception.Message)
+  }
+  if ($code -eq 0) { $patchInstalled = $true }
+}
 
 if ($action -ne 'restart') {
   Note 'quit complete'
@@ -163,4 +179,30 @@ if ($started) {
   Start-Sleep -Seconds 4
   $alive = Get-ByName $baseName
   Note ("replacement processes after 4s: " + $alive.Count)
+
+  # A patched package that cannot start would leave the user with a dead app.
+  # If nothing comes back within a generous window, put the previous package
+  # back and start again.
+  if ($patchInstalled -and $alive.Count -eq 0) {
+    $deadline2 = (Get-Date).AddSeconds(40)
+    while ((Get-Date) -lt $deadline2 -and (Get-ByName $baseName).Count -eq 0) {
+      Start-Sleep -Milliseconds 500
+    }
+    $alive = Get-ByName $baseName
+    if ($alive.Count -eq 0) {
+      $backup = Join-Path $stateDir ('patch\backup-' + $exeVersion + '.orig')
+      if (Test-Path -LiteralPath $backup) {
+        try {
+          Copy-Item -LiteralPath $backup -Destination $archive -Force -ErrorAction Stop
+          Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'dsh-restart.bridge') -Force -ErrorAction SilentlyContinue
+          Note 'patch: the patched package did not start; backup restored, starting again'
+          Start-Process -FilePath $exe | Out-Null
+        } catch {
+          Note ("patch: restore failed: " + $_.Exception.Message)
+        }
+      } else {
+        Note 'patch: the patched package did not start and no backup exists'
+      }
+    }
+  }
 }

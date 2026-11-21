@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.3
+
+- The graceful bridge now survives app updates by itself. Every DSH update
+  replaces `app.asar`, which drops the request pollers; the plugin rebuilds the
+  patched copy for the installed version shortly after startup and the helper
+  installs it during the next restart. Version, sizes and hash are re-checked at
+  install time, the replaced package is kept as a backup, and a patched package
+  that does not start is reverted automatically.
+- A bridge marker older than the installed package is treated as dead: the
+  click goes straight to the helper instead of waiting 2.5 s for a request
+  nobody consumes, and the marker is dropped after the first miss.
+- `DSH_SIDEBAR_ACTIONS_AUTO_PATCH=0` turns the rebuild off; `/state` and
+  `/diagnose` report `bridgeFresh` and the staged patch.
+
 ## 1.0.2
 
 - The forced helper no longer installs a staged `app.asar.new` over the

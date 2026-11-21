@@ -78,6 +78,16 @@ const LOG = join(STATE_DIR, 'host.log')
 const REQUEST = join(STATE_DIR, 'request.json')
 const LAUNCHER = join(STATE_DIR, 'launcher.vbs')
 
+/**
+ * Where the host stages a rebuilt bridge patch. DSH replaces `app.asar` on
+ * every update, so the poller is rebuilt for the installed version while the
+ * app runs and installed by the helper during the next restart.
+ */
+const PATCH_DIR = join(STATE_DIR, 'patch')
+const PATCH_STAGE = join(PATCH_DIR, 'app.asar')
+const PATCH_META = join(PATCH_DIR, 'meta.json')
+const AUTO_PATCH = process.env.DSH_SIDEBAR_ACTIONS_AUTO_PATCH !== '0'
+
 /** Contract with the optional desktop shell bridge. */
 const BRIDGE_RESTART = join(BASE, 'dsh-restart.request')
 const BRIDGE_QUIT = join(BASE, 'dsh-quit.request')
@@ -151,6 +161,23 @@ function hasShellBridge(force = false) {
   }
   bridgeCache = { at: now, value }
   return value
+}
+
+/**
+ * A marker is only meaningful while it is not older than the installed package.
+ * DSH rewrites `app.asar` on every update, which drops the poller; the helper
+ * rewrites the marker whenever it installs a fresh patch. So a marker that
+ * predates the archive means "no poller", and the plugin can skip the grace
+ * period instead of waiting for a request nobody consumes.
+ */
+function bridgeFresh() {
+  try {
+    const marker = statSync(BRIDGE_MARKER)
+    const archive = statSync(asarPath())
+    return marker.mtimeMs >= archive.mtimeMs
+  } catch {
+    return false
+  }
 }
 
 function desktopInfo() {
@@ -468,13 +495,21 @@ function writeBridgeRequest(action) {
   }
 
   // The bridge is detected, not guaranteed: if the shell ignores the file
-  // (e.g. the app was updated and lost the patch) fall back to the helper.
+  // (e.g. the app was updated and lost the patch) fall back to the helper and
+  // drop the marker, so the next click skips the grace period too.
   setTimeout(() => {
     try {
       if (!existsSync(file)) return
       rmSync(file, { force: true })
-      note('bridge request was not consumed; falling back to the helper')
+      try {
+        rmSync(BRIDGE_MARKER, { force: true })
+      } catch {
+        /* the marker is a hint; losing it only costs the graceful path */
+      }
+      bridgeCache = { at: 0, value: false }
+      note('bridge request was not consumed; marker dropped, falling back to the helper')
       void forced(action)
+      void ensurePatchStaged()
     } catch (error) {
       note(`bridge fallback failed: ${error?.message ?? error}`)
     }
@@ -507,6 +542,107 @@ async function forced(action) {
   return { ok: true, via: 'forced' }
 }
 
+/* ------------------------------------------------------------------ *
+ * Bridge patch upkeep
+ * ------------------------------------------------------------------ */
+
+let patchState = { staged: false, version: null, detail: 'not checked', at: 0 }
+
+function readPatchMeta() {
+  try {
+    return JSON.parse(readFileSync(PATCH_META, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Rebuild the bridge patch for the *installed* version and stage it for the
+ * next restart. Running against the installed package makes the version match
+ * by construction; the helper re-checks everything before it installs.
+ *
+ * Runs in the background shortly after startup: it reads the whole archive, so
+ * it is not something to do on the click path. A failure here only means the
+ * restarts stay on the forced path.
+ */
+async function ensurePatchStaged() {
+  const archive = asarPath()
+  let version = readDshVersion()
+  if (!version && archive && existsSync(archive)) {
+    try {
+      const { readArchiveVersion } = await import(new URL('./scripts/patch.js', import.meta.url).href)
+      version = readArchiveVersion(archive)
+    } catch {
+      /* fall back to the null version below */
+    }
+  }
+  if (!AUTO_PATCH || process.platform !== 'win32' || !desktopInfo().desktop) {
+    patchState = { staged: false, version, detail: 'auto patch disabled', at: Date.now() }
+    return patchState
+  }
+  if (bridgeFresh()) {
+    patchState = { staged: false, version, detail: 'bridge is live', at: Date.now() }
+    return patchState
+  }
+  if (!archive || !version || !existsSync(archive)) {
+    patchState = { staged: false, version, detail: 'installed package not readable', at: Date.now() }
+    return patchState
+  }
+
+  const meta = readPatchMeta()
+  try {
+    if (
+      meta &&
+      meta.version === version &&
+      existsSync(PATCH_STAGE) &&
+      statSync(PATCH_STAGE).size === meta.stageSize &&
+      statSync(archive).size === meta.baseSize
+    ) {
+      patchState = { staged: true, version, detail: 'staged earlier', at: Date.now() }
+      return patchState
+    }
+
+    mkdirSync(PATCH_DIR, { recursive: true })
+    const { buildPatchedArchive } = await import(new URL('./scripts/patch.js', import.meta.url).href)
+    const report = buildPatchedArchive(archive, PATCH_STAGE)
+    if (report.alreadyPatched) {
+      // The package on disk carries the pollers (e.g. installed by other
+      // tooling), so refresh the marker instead of staging a duplicate.
+      try {
+        writeFileSync(BRIDGE_MARKER, new Date().toISOString(), 'utf8')
+        bridgeCache = { at: 0, value: true }
+      } catch {
+        /* read-only base dir; the graceful path stays unavailable */
+      }
+      note('the installed package already carries the bridge pollers; marker refreshed')
+      patchState = { staged: false, version, detail: 'already patched', at: Date.now() }
+      return patchState
+    }
+    writeFileSync(
+      PATCH_META,
+      JSON.stringify(
+        {
+          version,
+          stage: PATCH_STAGE,
+          stageSize: report.outSize,
+          stageSha: report.sha,
+          baseSize: report.srcSize,
+          builtAt: new Date().toISOString(),
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    )
+    note(`bridge patch staged for ${version} (${report.outSize} bytes)`)
+    patchState = { staged: true, version, detail: 'staged now', at: Date.now() }
+  } catch (error) {
+    note(`bridge patch staging failed: ${error?.message ?? error}`)
+    patchState = { staged: false, version, detail: String(error?.message ?? error), at: Date.now() }
+  }
+  return patchState
+}
+
 async function perform(action) {
   const info = desktopInfo()
   if (!info.desktop) return { ok: false, error: 'desktop-only' }
@@ -522,7 +658,7 @@ async function perform(action) {
       }
     }
   }
-  if (info.bridge && writeBridgeRequest(action)) return { ok: true, via: 'graceful' }
+  if (info.bridge && bridgeFresh() && writeBridgeRequest(action)) return { ok: true, via: 'graceful' }
   return forced(action)
 }
 
@@ -578,7 +714,14 @@ function statePayload(extra = {}) {
     platform: info.platform,
     desktop: info.desktop,
     bridge: info.bridge,
+    bridgeFresh: info.bridge && bridgeFresh(),
     via: modeOf(info),
+    patch: {
+      auto: AUTO_PATCH,
+      staged: patchState.staged,
+      version: patchState.version,
+      detail: patchState.detail,
+    },
     shellPid: info.shellPid,
     shellExe: info.shellExe,
     task: { name: TASK_NAME, ready: taskState.ready, detail: taskState.detail },
@@ -601,6 +744,16 @@ export function apply(ctx) {
   // Best effort: register the helper task early so the first click is quick and
   // /state can report readiness. In graceful mode it is only the fallback.
   if (desktopInfo().desktop && process.platform === 'win32') void ensureTask()
+
+  // Keep the graceful bridge alive across app updates: rebuild the patch for
+  // the installed version once the app has settled, and let the helper install
+  // it during the next restart.
+  if (AUTO_PATCH && process.platform === 'win32') {
+    const timer = setTimeout(() => {
+      void ensurePatchStaged()
+    }, 6000)
+    timer.unref?.()
+  }
 
   const handlers = {
     /**

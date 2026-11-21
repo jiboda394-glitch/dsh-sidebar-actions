@@ -24,7 +24,7 @@ A DSH plugin that puts **reload / restart / quit** in the sidebar footer.
 ### DSH Desktop
 
 1. 打开 **设置 → 插件**（或插件市场）。
-2. 选「从本地目录安装」并选中本包的目录，或把 `dist/dsh-sidebar-actions-1.0.2.tgz` 的路径填进安装框。
+2. 选「从本地目录安装」并选中本包的目录，或把 `dist/dsh-sidebar-actions-1.0.3.tgz` 的路径填进安装框。
 3. 安装完成后刷新一次页面（页面里的「刷新」按钮就行），底部就会出现三个按钮。
 
 ### 普通 `dsh web`
@@ -34,7 +34,7 @@ dsh plugin --profile <profile> add ./dsh-sidebar-actions-<版本>.tgz
 # 或直接从 GitHub 安装（源码）：
 dsh plugin --profile <profile> add github:jiboda394-glitch/dsh-sidebar-actions
 # 或用 release 里的 tarball 地址（版本号按需替换）：
-dsh plugin --profile <profile> add https://github.com/jiboda394-glitch/dsh-sidebar-actions/releases/download/v1.0.2/dsh-sidebar-actions-1.0.2.tgz
+dsh plugin --profile <profile> add https://github.com/jiboda394-glitch/dsh-sidebar-actions/releases/download/v1.0.3/dsh-sidebar-actions-1.0.3.tgz
 ```
 
 装完重启一次 `dsh web`。
@@ -47,7 +47,9 @@ dsh plugin --profile <profile> add https://github.com/jiboda394-glitch/dsh-sideb
 
 桌面端主进程里加一小段轮询（见文末「可选：让重启走优雅路径」），插件写请求文件，主进程自己调用 `app.relaunch()` / `app.quit()`——和托盘菜单同一条路径，运行中的任务会走原生确认框。
 
-插件不靠猜：桥接方启动时在 `%LOCALAPPDATA%\dsh-restart.bridge` 留下标记文件，插件看到标记才走桥接。标记过期（应用升级把补丁覆盖掉）也不会卡死——请求文件 2.5 秒没人消费就自动退回下面的独立助手。
+插件不靠猜：桥接方启动时在 `%LOCALAPPDATA%\dsh-restart.bridge` 留下标记文件，插件看到标记才走桥接。标记比安装包旧（说明应用升级把补丁覆盖掉了）时直接走强制路径，不再空等 2.5 秒；请求文件 2.5 秒没人消费也会自动退回独立助手，并顺手把过期标记删掉。
+
+**补丁会自己修回来**：DSH 每次升级都会用官方包覆盖 `app.asar`，轮询器随之消失。插件在启动后会基于**当前安装的包**重建一份带轮询器的副本（版本天然一致，`patch\meta.json` 记录版本/大小/哈希），下次重启时由助手在应用停稳的窗口里替换。安装前重新核对版本、大小和哈希，替换前保留备份，替换后 40 秒内没起来会自动回滚并重开。所以升级后第一次重启仍走强制路径（稍慢），之后的重启/退出就回到 1–2 秒。`DSH_SIDEBAR_ACTIONS_AUTO_PATCH=0` 可关闭自动重建。
 
 ### 2. 独立助手（forced，无人值守）
 
@@ -59,7 +61,7 @@ dsh plugin --profile <profile> add https://github.com/jiboda394-glitch/dsh-sideb
 
 这条路径能在**未打补丁的原版应用**上工作，代价是：它是强制结束，**不会弹「当前任务会被中断」的原生确认**——所以按钮要求二次确认，悬停提示也会写明。Windows 专属；其他平台只能用桥接。
 
-助手只结束进程再用原始命令行拉起，**不写应用安装目录**。1.0.1 及更早版本会在这一步把一个「待安装的」`app.asar.new` 拷进安装目录：如果那个包是升级前打的旧补丁，重启就会把新版本的应用包换成旧的，启动直接失败（`app.asar.unpacked` 里报 `ENOENT`）。1.0.2 已移除该行为。
+助手只结束进程再用原始命令行拉起；唯一会写安装目录的动作，是安装上面那份**为本版本重建、并逐项校验过**的补丁。1.0.1 曾经在重启时盲目拷贝一个待安装的 `app.asar.new`（只看大小、不看版本），旧包盖新包直接让应用起不来（`app.asar.unpacked` 里报 `ENOENT`），1.0.2 删掉了那段逻辑，1.0.3 才以「版本 + 大小 + 哈希校验 + 备份 + 起不来自动回滚」的方式把它加回来。
 
 重启前还会比对 `app.asar` 的版本与主程序文件版本，不一致就拒绝重启并返回 `version-mismatch`——坏掉的安装会被指出来，而不是被启动。
 
@@ -95,8 +97,8 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\dsh-sidebar-actions"
 
 ## 可选：让重启走优雅路径
 
-> 这一步改的是应用自己的 `app.asar`，属于「你自己机器上的取舍」：应用每次升级都会覆盖回去，需要重新打。
-> 不打也能用，只是走上面的「独立助手」强制路径。
+> 1.0.3 起这一步由插件自己做（基于当前安装的包重建并校验），下面的手工做法只在你想自己控制、或者想加托盘菜单项时才需要。
+> 这一步改的是应用自己的 `app.asar`，属于「你自己机器上的取舍」：应用每次升级都会覆盖回去。
 
 在主进程（`resources/app.asar` 里的 `lib/main.js`）中，托盘初始化之后加：
 
@@ -140,7 +142,8 @@ Adds **reload / restart / quit** to the sidebar footer.
 - Reload is plain `location.reload()`.
 - Restart and quit need the desktop shell. The plugin uses a *graceful bridge* when `%LOCALAPPDATA%\dsh-restart.bridge` exists and the shell polls `dsh-restart.request` / `dsh-quit.request`; an ignored request falls back to a *detached helper* after 2.5 s: a per-user scheduled task (`DSH-SidebarActions`) running `scripts/dsh-stop.ps1` outside the app's process tree, which stops the shell process and starts the executable again with its original command line.
 - The forced path works on an unpatched app but interrupts running tasks without the native prompt, so every stop needs a second click.
-- The helper only stops and relaunches the app; it never writes to the installation. Restart is refused (`version-mismatch`) when the `app.asar` version does not match the executable's file version.
+- The helper only stops and relaunches the app; the one thing it writes is a bridge patch rebuilt for the installed version (version, size and hash re-checked, previous package kept as a backup, reverted automatically if the patched package does not start). DSH replaces `app.asar` on every update, so after an update the first restart rebuilds the patch and later restarts are fast again. `DSH_SIDEBAR_ACTIONS_AUTO_PATCH=0` disables the rebuild.
+- Restart is refused (`version-mismatch`) when the `app.asar` version does not match the executable's file version.
 - Windows only for the forced path; other platforms use the bridge exclusively.
 
 State and logs: `GET /dsh-sidebar-actions/api/state`, `%LOCALAPPDATA%\dsh-sidebar-actions\{host,helper}.log`.
